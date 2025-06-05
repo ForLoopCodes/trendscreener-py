@@ -1,4 +1,6 @@
 fastapi
 instaloader
 pydantic
+uvicorn
 typing
+requests
