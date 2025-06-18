@@ -46,6 +46,12 @@ PROXY_LIST = [
 # If you have authenticated proxies, use this format:
 # {"http": "http://username:password@proxy1:port", "https": "https://username:password@proxy1:port"}
 
+# Instagram credentials - replace with your actual credentials
+INSTAGRAM_CREDENTIALS = [
+    {"username": "forloopcodes", "password": "susguy69"},
+    # Add more accounts as needed
+]
+
 class ProxyRotator:
     def __init__(self, proxy_list: List[dict]):
         self.proxy_list = proxy_list
@@ -96,9 +102,109 @@ class ProxyRotator:
 
 proxy_rotator = ProxyRotator(PROXY_LIST)
 
-def create_instaloader_with_proxy(proxy=None):
-    """Create Instaloader instance with proxy configuration"""
+class InstagramAccountManager:
+    def __init__(self, credentials_list: List[dict]):
+        self.credentials_list = credentials_list
+        self.logged_in_accounts = {}
+        self.failed_accounts = set()
+        self.account_usage_count = {}
+        logger.info(f"Initialized InstagramAccountManager with {len(credentials_list)} accounts")
+    
+    def get_available_account(self):
+        """Get an available logged-in account or create a new session"""
+        # Find account with least usage that's not failed
+        available_accounts = [
+            cred for i, cred in enumerate(self.credentials_list) 
+            if i not in self.failed_accounts
+        ]
+        
+        if not available_accounts:
+            logger.warning("No available Instagram accounts")
+            return None
+            
+        # Sort by usage count (least used first)
+        available_accounts.sort(
+            key=lambda x: self.account_usage_count.get(x['username'], 0)
+        )
+        
+        selected_account = available_accounts[0]
+        username = selected_account['username']
+        
+        # Increment usage count
+        self.account_usage_count[username] = self.account_usage_count.get(username, 0) + 1
+        
+        logger.info(f"Selected Instagram account: {username} (usage: {self.account_usage_count[username]})")
+        return selected_account
+    
+    def mark_account_failed(self, username):
+        """Mark an account as failed"""
+        for i, cred in enumerate(self.credentials_list):
+            if cred['username'] == username:
+                self.failed_accounts.add(i)
+                logger.warning(f"Marked Instagram account {username} as failed")
+                # Remove from logged in accounts
+                if username in self.logged_in_accounts:
+                    del self.logged_in_accounts[username]
+                break
+    
+    def login_account(self, credentials, proxy=None):
+        """Login to Instagram with given credentials"""
+        username = credentials['username']
+        password = credentials['password']
+        
+        # Check if already logged in
+        if username in self.logged_in_accounts:
+            logger.debug(f"Account {username} already logged in")
+            return self.logged_in_accounts[username]
+        
+        try:
+            logger.info(f"Attempting to login to Instagram account: {username}")
+            L = instaloader.Instaloader()
+            
+            # Configure proxy if provided
+            if proxy:
+                logger.debug(f"Configuring login with proxy: {proxy_rotator._mask_proxy(proxy)}")
+                session = requests.Session()
+                session.proxies.update(proxy)
+                L._session = session
+            
+            # Perform login
+            L.login(username, password)
+            logger.info(f"Successfully logged in to Instagram account: {username}")
+            
+            # Store logged in session
+            self.logged_in_accounts[username] = L
+            return L
+            
+        except instaloader.exceptions.BadCredentialsException:
+            logger.error(f"Bad credentials for Instagram account: {username}")
+            self.mark_account_failed(username)
+            return None
+        except instaloader.exceptions.ConnectionException as e:
+            logger.error(f"Connection error during login for {username}: {str(e)}")
+            return None
+        except Exception as e:
+            logger.error(f"Login failed for Instagram account {username}: {str(e)}")
+            return None
+
+instagram_account_manager = InstagramAccountManager(INSTAGRAM_CREDENTIALS)
+
+def create_instaloader_with_proxy_and_login(proxy=None, use_login=True):
+    """Create Instaloader instance with proxy configuration and optional login"""
     logger.debug("Creating Instaloader instance")
+    
+    if use_login:
+        # Try to get an available account and login
+        account_credentials = instagram_account_manager.get_available_account()
+        if account_credentials:
+            L = instagram_account_manager.login_account(account_credentials, proxy)
+            if L:
+                logger.info(f"Using logged-in account: {account_credentials['username']}")
+                return L, account_credentials['username']
+            else:
+                logger.warning("Failed to login, falling back to anonymous access")
+    
+    # Fallback to anonymous Instaloader
     L = instaloader.Instaloader()
     
     if proxy:
@@ -110,7 +216,7 @@ def create_instaloader_with_proxy(proxy=None):
     else:
         logger.debug("Creating Instaloader without proxy")
     
-    return L
+    return L, None
 
 @app.middleware("http")
 async def log_requests(request, call_next):
@@ -135,6 +241,7 @@ async def get_post_likes_get(shortcode: str):
     logger.info(f"[{request_id}] Starting GET request for shortcode: {shortcode}")
     
     max_retries = 3
+    logged_username = None  # Track logged username for error handling
     
     for attempt in range(max_retries):
         attempt_start = time.time()
@@ -145,8 +252,10 @@ async def get_post_likes_get(shortcode: str):
             proxy = proxy_rotator.get_next_proxy()
             logger.info(f"[{request_id}] Using proxy: {proxy_rotator._mask_proxy(proxy) if proxy else 'Direct connection'}")
             
-            # Initialize Instaloader with proxy
-            L = create_instaloader_with_proxy(proxy)
+            # Initialize Instaloader with proxy and login
+            L, logged_username = create_instaloader_with_proxy_and_login(proxy)
+            if logged_username:
+                logger.info(f"[{request_id}] Using Instagram account: {logged_username}")
             
             # Add delay to avoid being too aggressive
             if attempt > 0:
@@ -261,9 +370,10 @@ async def get_post_likes(request: PostRequest):
             # Get a proxy for this request
             proxy = proxy_rotator.get_next_proxy()
             logger.info(f"[{request_id}] Using proxy: {proxy_rotator._mask_proxy(proxy) if proxy else 'Direct connection'}")
-            
-            # Initialize Instaloader with proxy
-            L = create_instaloader_with_proxy(proxy)
+              # Initialize Instaloader with proxy and login
+            L, logged_username = create_instaloader_with_proxy_and_login(proxy)
+            if logged_username:
+                logger.info(f"[{request_id}] Using Instagram account: {logged_username}")
             
             # Add delay to avoid being too aggressive
             if attempt > 0:
@@ -367,11 +477,20 @@ async def get_post_likes(request: PostRequest):
 async def root():
     logger.info("Root endpoint accessed")
     return {
-        "message": "Welcome to Instagram Post Likes API",
+        "message": "Welcome to Instagram Post Likes API with Login Support",
         "endpoints": {
             "POST /get_likes": "Send shortcode in request body",
-            "GET /get_likes?shortcode=YOUR_SHORTCODE": "Send shortcode as query parameter"
-        }
+            "GET /get_likes?shortcode=YOUR_SHORTCODE": "Send shortcode as query parameter",
+            "GET /proxy_status": "Check proxy health status",
+            "GET /account_status": "Check Instagram account status",
+            "GET /logs": "View recent log entries"
+        },
+        "features": [
+            "Multiple proxy rotation",
+            "Instagram account login support",
+            "Automatic retry with different accounts/proxies",
+            "Comprehensive logging and debugging"
+        ]
     }
 
 @app.get("/proxy_status")
@@ -385,6 +504,20 @@ async def proxy_status():
         "failed_proxy_indices": list(proxy_rotator.failed_proxies)
     }
     logger.info(f"Proxy status: {status}")
+    return status
+
+@app.get("/account_status")
+async def account_status():
+    """Endpoint to check Instagram account status"""
+    logger.info("Account status endpoint accessed")
+    status = {
+        "total_accounts": len(INSTAGRAM_CREDENTIALS),
+        "failed_accounts": len(instagram_account_manager.failed_accounts),
+        "available_accounts": len(INSTAGRAM_CREDENTIALS) - len(instagram_account_manager.failed_accounts),
+        "logged_in_accounts": len(instagram_account_manager.logged_in_accounts),
+        "account_usage": instagram_account_manager.account_usage_count
+    }
+    logger.info(f"Account status: {status}")
     return status
 
 @app.get("/logs")
@@ -402,6 +535,8 @@ async def get_recent_logs():
 # Log startup
 logger.info("Instagram API starting up")
 logger.info(f"Proxy configuration: {len(PROXY_LIST)} proxies loaded")
+logger.info(f"Instagram accounts: {len(INSTAGRAM_CREDENTIALS)} accounts configured")
+logger.info("Features enabled: Proxy rotation, Account login, Comprehensive logging")
 
 if __name__ == "__main__":
     import uvicorn
