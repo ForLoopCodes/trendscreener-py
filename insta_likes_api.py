@@ -128,6 +128,124 @@ async def log_requests(request, call_next):
     
     return response
 
+@app.get("/get_likes", response_model=LikesResponse)
+async def get_post_likes_get(shortcode: str):
+    """GET endpoint that works the same as POST /get_likes but with query parameters"""
+    request_id = f"req_{int(time.time())}_{random.randint(1000, 9999)}"
+    logger.info(f"[{request_id}] Starting GET request for shortcode: {shortcode}")
+    
+    max_retries = 3
+    
+    for attempt in range(max_retries):
+        attempt_start = time.time()
+        logger.info(f"[{request_id}] Attempt {attempt + 1}/{max_retries}")
+        
+        try:
+            # Get a proxy for this request
+            proxy = proxy_rotator.get_next_proxy()
+            logger.info(f"[{request_id}] Using proxy: {proxy_rotator._mask_proxy(proxy) if proxy else 'Direct connection'}")
+            
+            # Initialize Instaloader with proxy
+            L = create_instaloader_with_proxy(proxy)
+            
+            # Add delay to avoid being too aggressive
+            if attempt > 0:
+                delay = random.uniform(1, 3)
+                logger.info(f"[{request_id}] Adding delay of {delay:.2f} seconds before retry")
+                time.sleep(delay)
+            
+            logger.debug(f"[{request_id}] Fetching post data from Instagram")
+            # Get post from shortcode
+            post = instaloader.Post.from_shortcode(L.context, shortcode)
+            
+            # Get post data
+            likes_count = post.likes
+            comments_count = post.comments
+            views_count = post.video_view_count if post.is_video else 0
+            
+            logger.info(f"[{request_id}] Successfully fetched post data:")
+            logger.info(f"[{request_id}] - Likes: {likes_count}")
+            logger.info(f"[{request_id}] - Comments: {comments_count}")
+            logger.info(f"[{request_id}] - Views: {views_count}")
+            logger.info(f"[{request_id}] - Is Video: {post.is_video}")
+            
+            if not likes_count:
+                logger.warning(f"[{request_id}] Post found but has no likes")
+                raise HTTPException(status_code=404, detail="Post not found or has no likes.")
+            
+            # Get caption (optional)
+            caption = post.caption if post.caption else None
+            if caption:
+                logger.debug(f"[{request_id}] Caption length: {len(caption)} characters")
+            
+            attempt_time = time.time() - attempt_start
+            logger.info(f"[{request_id}] Request completed successfully in {attempt_time:.2f} seconds")
+            
+            response = LikesResponse(
+                shortcode=shortcode,
+                likes_count=likes_count,
+                comments_count=comments_count,
+                views_count=views_count,
+                caption=caption
+            )
+            
+            logger.debug(f"[{request_id}] Response: {json.dumps(response.dict(), indent=2)}")
+            return response
+            
+        except instaloader.exceptions.InstaloaderException as e:
+            attempt_time = time.time() - attempt_start
+            error_msg = str(e)
+            logger.error(f"[{request_id}] InstaloaderException in attempt {attempt + 1}: {error_msg}")
+            logger.error(f"[{request_id}] Attempt failed in {attempt_time:.2f} seconds")
+            
+            if "rate limit" in error_msg.lower() or "too many requests" in error_msg.lower():
+                logger.warning(f"[{request_id}] Rate limit detected")
+                # Mark current proxy as failed and try with a different one
+                if proxy:
+                    proxy_rotator.mark_proxy_failed(proxy)
+                
+                if attempt < max_retries - 1:
+                    logger.info(f"[{request_id}] Will retry with different proxy")
+                    continue
+                else:
+                    logger.error(f"[{request_id}] Rate limited on all available proxies")
+                    raise HTTPException(
+                        status_code=429,
+                        detail="Rate limited on all available proxies. Please try again later."
+                    )
+            else:
+                logger.error(f"[{request_id}] Other Instaloader error: {error_msg}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error fetching post data: {error_msg}"
+                )
+                
+        except Exception as e:
+            attempt_time = time.time() - attempt_start
+            error_msg = str(e)
+            logger.error(f"[{request_id}] Generic exception in attempt {attempt + 1}: {error_msg}")
+            logger.error(f"[{request_id}] Attempt failed in {attempt_time:.2f} seconds")
+            logger.exception(f"[{request_id}] Full exception details:")
+            
+            if attempt < max_retries - 1:
+                # Try with different proxy on generic errors
+                if proxy:
+                    proxy_rotator.mark_proxy_failed(proxy)
+                logger.info(f"[{request_id}] Will retry with different proxy")
+                continue
+            else:
+                logger.error(f"[{request_id}] All retry attempts exhausted")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Internal server error: {error_msg}"
+                )
+    
+    logger.error(f"[{request_id}] Failed to fetch data after all retry attempts")
+    raise HTTPException(
+        status_code=500,
+        detail="Failed to fetch data after all retry attempts"
+    )
+
 @app.post("/get_likes", response_model=LikesResponse)
 async def get_post_likes(request: PostRequest):
     request_id = f"req_{int(time.time())}_{random.randint(1000, 9999)}"
@@ -248,7 +366,13 @@ async def get_post_likes(request: PostRequest):
 @app.get("/")
 async def root():
     logger.info("Root endpoint accessed")
-    return {"message": "Welcome to Instagram Post Likes API. Use POST /get_likes with a shortcode."}
+    return {
+        "message": "Welcome to Instagram Post Likes API",
+        "endpoints": {
+            "POST /get_likes": "Send shortcode in request body",
+            "GET /get_likes?shortcode=YOUR_SHORTCODE": "Send shortcode as query parameter"
+        }
+    }
 
 @app.get("/proxy_status")
 async def proxy_status():
