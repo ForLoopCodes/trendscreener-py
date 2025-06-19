@@ -21,10 +21,6 @@ class LikesResponse(BaseModel):
     views_count: Optional[int] = None
     caption: Optional[str] = None
 
-# Instagram credentials - replace with your actual credentials
-USERNAME = "beet3531"
-PASSWORD = "susguy69"
-
 # Global client instance
 cl = Client()
 
@@ -32,7 +28,7 @@ cl = Client()
 async def startup_event():
     """Login to Instagram on startup"""
     try:
-        cl.login(USERNAME, PASSWORD)
+        cl.login("beet3531", "susguy69")
         logger.info("Successfully logged in to Instagram")
     except Exception as e:
         logger.error(f"Failed to login: {e}")
