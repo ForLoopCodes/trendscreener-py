@@ -3,5 +3,7 @@ instaloader
 pydantic
 uvicorn
 typing
+PIL
+pillow
 requests
 instagrapi
